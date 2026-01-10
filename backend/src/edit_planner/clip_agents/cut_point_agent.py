@@ -92,6 +92,33 @@ class CutPointAgent:
         result = Runner.run_sync(self._agent, prompt)
         return result.final_output
 
+    async def find_cut_points_async(
+        self,
+        clip: ClipForAssembly,
+        target_duration_seconds: float,
+        is_dialogue: bool,
+        style_profile: StyleProfile | None,
+    ) -> CutPointDecision:
+        """Find optimal cut points for a clip (async version).
+
+        Args:
+            clip: The clip to find cut points for.
+            target_duration_seconds: Desired duration for this clip.
+            is_dialogue: Whether the clip is dialogue or b-roll.
+            style_profile: Optional style profile for context.
+
+        Returns:
+            CutPointDecision with source in/out times.
+        """
+        prompt = self._build_prompt(
+            clip,
+            target_duration_seconds,
+            is_dialogue,
+            style_profile,
+        )
+        result = await Runner.run(self._agent, prompt)
+        return result.final_output
+
     def _build_prompt(
         self,
         clip: ClipForAssembly,

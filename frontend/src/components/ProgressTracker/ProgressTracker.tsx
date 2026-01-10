@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Check, AlertCircle, Loader2, Sparkles, Pause } from 'lucide-react';
+import { Check, AlertCircle, Loader2, Sparkles, Pause, X } from 'lucide-react';
 import clsx from 'clsx';
 import { wsClient } from '../../api/websocket';
 import { useProgressStore } from '../../store/progressStore';
@@ -10,6 +10,10 @@ interface ProgressTrackerProps {
   jobId: string;
   /** Whether the job appears stuck (no active progress updates) */
   isStuck?: boolean;
+  /** Whether the job has failed */
+  isFailed?: boolean;
+  /** Error message for failed jobs */
+  errorMessage?: string;
   /** Checkpoint: manifest exists (annotation complete) */
   hasManifest?: boolean;
   /** Checkpoint: blueprint exists (planning complete) */
@@ -26,7 +30,7 @@ const STAGES: { key: PipelineStage; label: string; description: string }[] = [
   { key: 'completed', label: 'Done', description: 'Export ready' },
 ];
 
-export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, hasBlueprint = false, hasStyleProfile = false }: ProgressTrackerProps) {
+export function ProgressTracker({ jobId, isStuck = false, isFailed: isFailedProp = false, errorMessage, hasManifest = false, hasBlueprint = false, hasStyleProfile = false }: ProgressTrackerProps) {
   const {
     stage: wsStage,
     progressPercent: wsProgressPercent,
@@ -42,24 +46,30 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
     return () => wsClient.disconnect();
   }, [jobId, updateProgress]);
 
-  // Determine stage and progress based on checkpoints when stuck
+  // Determine stage and progress based on checkpoints when stuck or failed
   let stage = wsStage;
   let progressPercent = wsProgressPercent;
 
-  if (isStuck && wsProgressPercent === 0) {
-    // Initialize from checkpoints - show paused at the NEXT stage after checkpoint
+  if ((isStuck || isFailedProp) && wsProgressPercent === 0) {
+    // Initialize from checkpoints - show where we got to
     if (hasBlueprint) {
-      stage = 'executing';  // Blueprint done = paused at execute/generate
+      stage = isFailedProp ? 'executing' : 'executing';  // Failed/paused during execute
       progressPercent = 70;
+    } else if (hasStyleProfile) {
+      stage = 'planning';   // Style done = at planning stage
+      progressPercent = 55;
     } else if (hasManifest) {
       stage = 'planning';   // Manifest done = paused at planning
-      progressPercent = 60;
+      progressPercent = 50;
+    } else {
+      stage = 'annotating'; // Failed early
+      progressPercent = 25;
     }
   }
 
   const currentStageIndex = STAGES.findIndex((s) => s.key === stage);
   const isComplete = stage === 'completed';
-  const isFailed = stage === 'failed';
+  const isFailed = stage === 'failed' || isFailedProp;
   const isActive = !isComplete && !isFailed && !isStuck;
 
   return (
@@ -71,12 +81,15 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
           {isActive && (
             <Loader2 className="w-3 h-3 text-accent-cyan animate-spin" />
           )}
+          {isFailed && (
+            <X className="w-3 h-3 text-red-400" />
+          )}
           {isStuck && !isComplete && !isFailed && (
             <Pause className="w-3 h-3 text-amber-400" />
           )}
           <span className={clsx(
             "text-xs font-mono",
-            isStuck && !isComplete && !isFailed ? "text-amber-400" : "text-white/50"
+            isFailed ? "text-red-400" : isStuck && !isComplete ? "text-amber-400" : "text-white/50"
           )}>
             {isComplete ? 'COMPLETE' : isFailed ? 'FAILED' : isStuck ? 'STUCK' : 'PROCESSING'}
           </span>
@@ -89,6 +102,7 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
           const isCurrentStage = index === currentStageIndex;
           const isDone = index < currentStageIndex || isComplete;
           const isStuckAtStage = isStuck && isCurrentStage && !isComplete && !isFailed;
+          const isFailedAtStage = isFailed && isCurrentStage;
 
           return (
             <div key={s.key} className="flex items-center flex-1 last:flex-initial">
@@ -98,17 +112,21 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
                     'w-10 h-10 rounded-xl flex items-center justify-center text-xs font-medium border transition-all duration-300',
                     isDone
                       ? 'bg-accent-cyan/20 border-accent-cyan/30 text-accent-cyan'
+                      : isFailedAtStage
+                      ? 'bg-red-500/10 border-red-500/30 text-red-400'
                       : isStuckAtStage
                       ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
                       : isCurrentStage
                       ? 'bg-white/[0.05] border-accent-cyan/50 text-white shadow-glow-sm'
                       : 'bg-white/[0.02] border-white/[0.06] text-white/30'
                   )}
-                  animate={isCurrentStage && !isStuck ? { scale: [1, 1.05, 1] } : {}}
+                  animate={isCurrentStage && !isStuck && !isFailed ? { scale: [1, 1.05, 1] } : {}}
                   transition={{ duration: 2, repeat: Infinity }}
                 >
                   {isDone ? (
                     <Check className="w-4 h-4" />
+                  ) : isFailedAtStage ? (
+                    <X className="w-4 h-4" />
                   ) : isStuckAtStage ? (
                     <Pause className="w-4 h-4" />
                   ) : isCurrentStage ? (
@@ -121,7 +139,7 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
                   <span
                     className={clsx(
                       'text-xs font-medium block',
-                      isStuckAtStage ? 'text-amber-400' : isCurrentStage ? 'text-white' : isDone ? 'text-accent-cyan/80' : 'text-white/30'
+                      isFailedAtStage ? 'text-red-400' : isStuckAtStage ? 'text-amber-400' : isCurrentStage ? 'text-white' : isDone ? 'text-accent-cyan/80' : 'text-white/30'
                     )}
                   >
                     {s.label}
@@ -151,13 +169,15 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
       <div className="space-y-3">
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            <span className={clsx("text-xs truncate", isStuck ? "text-amber-400/70" : "text-white/40")}>
-              {isStuck && !currentItem && !message
+            <span className={clsx("text-xs truncate", isFailed ? "text-red-400/70" : isStuck ? "text-amber-400/70" : "text-white/40")}>
+              {isFailed && !currentItem && !message
+                ? `Failed${hasBlueprint ? ' (planning complete)' : hasStyleProfile ? ' (style extracted)' : hasManifest ? ' (analysis complete)' : ''}`
+                : isStuck && !currentItem && !message
                 ? `Paused at checkpoint${hasBlueprint ? ' (planning complete)' : hasStyleProfile ? ' (style extracted)' : hasManifest ? ' (analysis complete)' : ''}`
                 : currentItem || message || 'Initializing...'}
             </span>
           </div>
-          <span className="text-sm font-mono text-accent-cyan ml-4">
+          <span className={clsx("text-sm font-mono ml-4", isFailed ? "text-red-400" : "text-accent-cyan")}>
             {Math.round(progressPercent)}%
           </span>
         </div>
@@ -202,7 +222,7 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
             <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
             <div>
               <p className="text-sm text-red-400 font-medium">Processing Failed</p>
-              {message && <p className="text-xs text-red-400/70 mt-1">{message}</p>}
+              {(errorMessage || message) && <p className="text-xs text-red-400/70 mt-1">{errorMessage || message}</p>}
             </div>
           </motion.div>
         )}

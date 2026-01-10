@@ -1,7 +1,46 @@
 """EditPlanner service for creating timeline blueprints."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeVar
+
+# Limit concurrent API calls to avoid connection errors
+MAX_CONCURRENT_API_CALLS = 4
+_api_semaphore: asyncio.Semaphore | None = None
+
+T = TypeVar("T")
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Get or create the API semaphore for the current event loop."""
+    global _api_semaphore
+    if _api_semaphore is None:
+        _api_semaphore = asyncio.Semaphore(MAX_CONCURRENT_API_CALLS)
+    return _api_semaphore
+
+
+async def _with_retry(
+    coro_func: Callable[..., Awaitable[T]],
+    *args: object,
+    max_retries: int = 3,
+) -> T:
+    """Run an async function with retry logic for connection errors."""
+    sem = _get_semaphore()
+    for attempt in range(max_retries):
+        try:
+            async with sem:
+                return await coro_func(*args)
+        except Exception as e:
+            if "Connection" in str(e) and attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                print(f"  Connection error, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_time)
+            else:
+                raise
+    # This should never be reached due to the raise in the except block
+    msg = "Retry loop exited unexpectedly"
+    raise RuntimeError(msg)
 
 from src.asset_annotator.schemas import VideoAssetAnnotation
 from src.common.openai_model_identifier import OpenAIModelIdentifier
@@ -265,62 +304,33 @@ class EditPlannerService:
     ) -> list[CutDecision]:
         """Create cut decisions using agents and beat alignment.
 
-        Runs quality filter and cut point agents in parallel for all clips.
+        Runs quality filter and cut point agents concurrently using asyncio.
         """
         clips = chunk_context.clips_in_chunk
         if not clips:
             return []
 
-        chunk_duration = chunk_context.chunk_duration_seconds
-        align_to_beats = style.prefer_beat_alignment if style else True
-
-        # Step 1: Run quality filter for all clips in parallel
-        quality_results: dict[int, QualityFilterResult] = {}
-
-        def filter_one(clip: ClipForAssembly) -> tuple[int, QualityFilterResult]:
-            result = self._quality_filter.evaluate(clip, chunk_duration)
-            return clip.clip_index, result
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(filter_one, clip) for clip in clips]
-            for future in as_completed(futures):
-                clip_index, result = future.result()
-                quality_results[clip_index] = result
-
-        # Filter to clips that pass quality check
-        passing_clips = [
-            clip for clip in clips
-            if quality_results[clip.clip_index].decision != QualityDecision.SKIP
-        ]
-
-        for clip in clips:
-            if quality_results[clip.clip_index].decision == QualityDecision.SKIP:
-                print(f"  Skipping clip {clip.clip_index}: {quality_results[clip.clip_index].reasoning}")
+        # Run async operations using asyncio.run()
+        quality_results, cut_point_results, passing_clips = asyncio.run(
+            self._run_chunk_agents_async(
+                clips,
+                chunk_context.chunk_duration_seconds,
+                target_clip_duration,
+                clip_classifications,
+                style,
+            )
+        )
 
         if not passing_clips:
             return []
 
-        # Step 2: Run cut point agent for all passing clips in parallel
-        cut_point_results: dict[int, CutPointDecision] = {}
+        # Log skipped clips
+        for clip in clips:
+            if quality_results[clip.clip_index].decision == QualityDecision.SKIP:
+                print(f"  Skipping clip {clip.clip_index}: {quality_results[clip.clip_index].reasoning}")
 
-        def cut_one(clip: ClipForAssembly) -> tuple[int, CutPointDecision]:
-            classification = clip_classifications[clip.clip_index]
-            is_dialogue = classification.classification == ClipClassification.DIALOGUE
-            result = self._cut_point_agent.find_cut_points(
-                clip=clip,
-                target_duration_seconds=target_clip_duration,
-                is_dialogue=is_dialogue,
-                style_profile=style,
-            )
-            return clip.clip_index, result
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(cut_one, clip) for clip in passing_clips]
-            for future in as_completed(futures):
-                clip_index, result = future.result()
-                cut_point_results[clip_index] = result
-
-        # Step 3: Assemble decisions sequentially (for timeline ordering)
+        # Assemble decisions sequentially (for timeline ordering)
+        align_to_beats = style.prefer_beat_alignment if style else True
         decisions: list[CutDecision] = []
         current_timeline = timeline_cursor
 
@@ -375,6 +385,62 @@ class EditPlannerService:
 
         return decisions
 
+    async def _run_chunk_agents_async(
+        self,
+        clips: list[ClipForAssembly],
+        chunk_duration: float,
+        target_clip_duration: float,
+        clip_classifications: dict[int, DialogueClassifierResult],
+        style: StyleProfile | None,
+    ) -> tuple[
+        dict[int, QualityFilterResult],
+        dict[int, CutPointDecision],
+        list[ClipForAssembly],
+    ]:
+        """Run quality filter and cut point agents concurrently.
+
+        Returns:
+            Tuple of (quality_results, cut_point_results, passing_clips)
+        """
+        # Step 1: Run quality filter for all clips concurrently (with rate limiting)
+        async def filter_one(clip: ClipForAssembly) -> tuple[int, QualityFilterResult]:
+            result: QualityFilterResult = await _with_retry(
+                self._quality_filter.evaluate_async, clip, chunk_duration
+            )
+            return clip.clip_index, result
+
+        quality_tasks = [filter_one(clip) for clip in clips]
+        quality_results_list = await asyncio.gather(*quality_tasks)
+        quality_results = dict(quality_results_list)
+
+        # Filter to clips that pass quality check
+        passing_clips = [
+            clip for clip in clips
+            if quality_results[clip.clip_index].decision != QualityDecision.SKIP
+        ]
+
+        if not passing_clips:
+            return quality_results, {}, []
+
+        # Step 2: Run cut point agent for all passing clips concurrently (with rate limiting)
+        async def cut_one(clip: ClipForAssembly) -> tuple[int, CutPointDecision]:
+            classification = clip_classifications[clip.clip_index]
+            is_dialogue = classification.classification == ClipClassification.DIALOGUE
+            result: CutPointDecision = await _with_retry(
+                self._cut_point_agent.find_cut_points_async,
+                clip,
+                target_clip_duration,
+                is_dialogue,
+                style,
+            )
+            return clip.clip_index, result
+
+        cut_tasks = [cut_one(clip) for clip in passing_clips]
+        cut_results_list = await asyncio.gather(*cut_tasks)
+        cut_point_results = dict(cut_results_list)
+
+        return quality_results, cut_point_results, passing_clips
+
     def _snap_to_beat(
         self,
         time_seconds: float,
@@ -406,27 +472,33 @@ class EditPlannerService:
     def _classify_clips_parallel(
         self,
         clips: list[ClipForAssembly],
-        max_workers: int = 8,
     ) -> dict[int, DialogueClassifierResult]:
-        """Classify all clips in parallel using thread pool.
+        """Classify all clips concurrently using asyncio.
 
         Args:
             clips: List of clips to classify.
-            max_workers: Maximum number of parallel workers.
 
         Returns:
             Dict mapping clip_index to classification result.
         """
-        results: dict[int, DialogueClassifierResult] = {}
+        return asyncio.run(self._classify_clips_async(clips))
 
-        def classify_one(clip: ClipForAssembly) -> tuple[int, DialogueClassifierResult]:
-            result = self._dialogue_classifier.classify(clip)
+    async def _classify_clips_async(
+        self,
+        clips: list[ClipForAssembly],
+    ) -> dict[int, DialogueClassifierResult]:
+        """Classify all clips concurrently with rate limiting and retry.
+
+        Args:
+            clips: List of clips to classify.
+
+        Returns:
+            Dict mapping clip_index to classification result.
+        """
+        async def classify_one(clip: ClipForAssembly) -> tuple[int, DialogueClassifierResult]:
+            result = await _with_retry(self._dialogue_classifier.classify_async, clip)
             return clip.clip_index, result
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(classify_one, clip): clip for clip in clips}
-            for future in as_completed(futures):
-                clip_index, classification = future.result()
-                results[clip_index] = classification
-
-        return results
+        tasks = [classify_one(clip) for clip in clips]
+        results_list = await asyncio.gather(*tasks)
+        return dict(results_list)

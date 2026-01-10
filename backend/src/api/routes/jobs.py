@@ -290,20 +290,21 @@ async def resume_job(
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Only allow resuming jobs that are in intermediate stages (stuck)
-    stuck_stages = {
+    # Allow resuming jobs that are stuck or failed
+    resumable_stages = {
         JobStage.QUEUED,
         JobStage.DOWNLOADING_FILES,
         JobStage.ANNOTATING_ASSETS,
         JobStage.PLANNING_EDITS,
         JobStage.EXECUTING_TIMELINE,
         JobStage.UPLOADING_RESULT,
+        JobStage.FAILED,  # Allow retrying failed jobs from checkpoint
     }
 
-    if job.stage not in stuck_stages:
+    if job.stage not in resumable_stages:
         raise HTTPException(
             status_code=400,
-            detail=f"Job cannot be resumed from stage: {job.stage}. Use start for new jobs or restart for completed/failed jobs.",
+            detail=f"Job cannot be resumed from stage: {job.stage}. Use start for new jobs.",
         )
 
     # Reset to QUEUED stage to restart pipeline

@@ -557,15 +557,27 @@ export function JobDetailPage() {
                 )}
 
                 {isJobFailed && !isProcessing && (
-                  <div className="flex items-start gap-3 p-4 rounded-lg bg-red-500/10 border border-red-500/20">
-                    <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-sm text-red-400 font-medium">Processing Failed</p>
-                      <p className="text-xs text-red-400/70 mt-1">
-                        {currentJob.error_message || 'The job encountered an error. Please try creating a new job.'}
-                      </p>
+                  <>
+                    <ProgressTracker
+                      jobId={currentJob.id}
+                      isFailed={true}
+                      errorMessage={currentJob.error_message || 'The job encountered an error.'}
+                      hasManifest={currentJob.manifest_id != null}
+                      hasBlueprint={currentJob.blueprint_id != null}
+                      hasStyleProfile={currentJob.has_style_profile}
+                    />
+                    <div className="mt-4 pt-4 border-t border-white/[0.06]">
+                      <Button
+                        onClick={handleResumeJob}
+                        disabled={isResuming}
+                        loading={isResuming}
+                        size="sm"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+                        {isResuming ? 'Retrying...' : 'Retry from Checkpoint'}
+                      </Button>
                     </div>
-                  </div>
+                  </>
                 )}
               </GlassCard>
             </motion.div>

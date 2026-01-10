@@ -91,6 +91,19 @@ class DialogueClassifierAgent:
         result = Runner.run_sync(self._agent, prompt)
         return result.final_output
 
+    async def classify_async(self, clip: ClipForAssembly) -> DialogueClassifierResult:
+        """Classify a clip as dialogue or B-roll (async version).
+
+        Args:
+            clip: The clip to classify.
+
+        Returns:
+            Classification result with type and reasoning.
+        """
+        prompt = self._build_prompt(clip)
+        result = await Runner.run(self._agent, prompt)
+        return result.final_output
+
     def _build_prompt(self, clip: ClipForAssembly) -> str:
         """Build the classification prompt for a clip."""
         # Add duration context

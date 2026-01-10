@@ -98,6 +98,24 @@ class QualityFilterAgent:
         result = Runner.run_sync(self._agent, prompt)
         return result.final_output
 
+    async def evaluate_async(
+        self,
+        clip: ClipForAssembly,
+        chunk_duration: float,
+    ) -> QualityFilterResult:
+        """Evaluate whether a clip should be included or skipped (async version).
+
+        Args:
+            clip: The clip to evaluate.
+            chunk_duration: Duration of the current chunk/beat in seconds.
+
+        Returns:
+            Quality filter result with decision, confidence, and reasoning.
+        """
+        prompt = self._build_prompt(clip, chunk_duration)
+        result = await Runner.run(self._agent, prompt)
+        return result.final_output
+
     def _build_prompt(self, clip: ClipForAssembly, chunk_duration: float) -> str:
         """Build the quality evaluation prompt for a clip."""
         # Calculate usable duration
