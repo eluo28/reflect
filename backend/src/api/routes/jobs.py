@@ -1,0 +1,337 @@
+"""Job management routes."""
+
+from collections.abc import AsyncIterator
+
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+
+from src.api.schemas.requests import CreateJobRequest, StartJobRequest
+from src.api.schemas.responses import JobResponse, UploadResponse
+from src.mongodb.gridfs_service import FileType, get_gridfs_service
+from src.mongodb.repositories import JobRepository
+from src.mongodb.schemas import JobDocument, JobStage
+from src.pipeline.job_runner import JobRunner
+
+router = APIRouter()
+
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".webm"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+
+# Chunk size for streaming uploads (1MB for optimal performance)
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+async def _stream_upload_file(upload_file: UploadFile) -> AsyncIterator[bytes]:
+    """Stream chunks from an UploadFile without loading entire file into memory."""
+    while chunk := await upload_file.read(UPLOAD_CHUNK_SIZE):
+        yield chunk
+
+
+def _get_file_type(filename: str) -> FileType | None:
+    """Determine file type from filename extension."""
+    lower = filename.lower()
+    for ext in VIDEO_EXTENSIONS:
+        if lower.endswith(ext):
+            return FileType.VIDEO_CLIP
+    for ext in AUDIO_EXTENSIONS:
+        if lower.endswith(ext):
+            return FileType.AUDIO_CLIP
+    return None
+
+
+def _to_response(doc: JobDocument) -> JobResponse:
+    """Convert JobDocument to JobResponse."""
+    return JobResponse(
+        id=str(doc.id),
+        name=doc.name,
+        description=doc.description,
+        stage=str(doc.stage),
+        video_file_count=len(doc.video_file_ids),
+        audio_file_count=len(doc.audio_file_ids),
+        progress_percent=doc.progress_percent,
+        current_file=doc.current_file,
+        total_files=doc.total_files,
+        processed_files=doc.processed_files,
+        error_message=doc.error_message,
+        otio_file_id=doc.otio_file_id,
+        manifest_id=doc.manifest_id,
+        blueprint_id=doc.blueprint_id,
+        created_at=doc.created_at,
+        started_at=doc.started_at,
+        completed_at=doc.completed_at,
+        updated_at=doc.updated_at,
+    )
+
+
+@router.post("", response_model=JobResponse)
+async def create_job(request: CreateJobRequest) -> JobResponse:
+    """Create a new job."""
+    repo = JobRepository.create()
+    doc = await repo.create_job(name=request.name, description=request.description)
+    return _to_response(doc)
+
+
+@router.get("", response_model=list[JobResponse])
+async def list_jobs() -> list[JobResponse]:
+    """List all jobs."""
+    repo = JobRepository.create()
+    docs = await repo.list_jobs()
+    return [_to_response(doc) for doc in docs]
+
+
+@router.get("/{job_id}", response_model=JobResponse)
+async def get_job(job_id: str) -> JobResponse:
+    """Get a job by ID."""
+    repo = JobRepository.create()
+    doc = await repo.get_job(job_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _to_response(doc)
+
+
+@router.delete("/{job_id}")
+async def delete_job(job_id: str) -> dict[str, str]:
+    """Delete a job."""
+    repo = JobRepository.create()
+    deleted = await repo.delete_job(job_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": "deleted", "job_id": job_id}
+
+
+@router.post("/{job_id}/files", response_model=list[UploadResponse])
+async def upload_files(
+    job_id: str,
+    files: list[UploadFile] = File(...),
+) -> list[UploadResponse]:
+    """Upload video/audio files to a job."""
+    job_repo = JobRepository.create()
+    job = await job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    gridfs = get_gridfs_service()
+    responses: list[UploadResponse] = []
+    video_ids: list[str] = []
+    audio_ids: list[str] = []
+
+    for upload_file in files:
+        if upload_file.filename is None:
+            continue
+
+        file_type = _get_file_type(upload_file.filename)
+        if file_type is None:
+            continue  # Skip unsupported files
+
+        content_type = upload_file.content_type or "application/octet-stream"
+
+        # Read file into memory for upload + local caching
+        # (For local dev, caching is more important than memory efficiency)
+        contents = await upload_file.read()
+
+        # Upload to GridFS
+        stored = await gridfs.upload_bytes(
+            data=contents,
+            filename=upload_file.filename,
+            file_type=file_type,
+            content_type=content_type,
+            project_id=job_id,
+        )
+
+        # Also cache locally for fast pipeline access (skips download later)
+        await gridfs.cache_file(stored.file_id, contents)
+
+        # Track file IDs by type
+        if file_type == FileType.VIDEO_CLIP:
+            video_ids.append(stored.file_id)
+        else:
+            audio_ids.append(stored.file_id)
+
+        responses.append(
+            UploadResponse(
+                file_id=stored.file_id,
+                filename=stored.filename,
+                size_bytes=stored.size_bytes,
+                content_type=stored.content_type,
+            )
+        )
+
+    # Update job with file references
+    if video_ids:
+        await job_repo.add_video_files(job_id, video_ids)
+    if audio_ids:
+        await job_repo.add_audio_files(job_id, audio_ids)
+
+    return responses
+
+
+@router.post("/{job_id}/style-reference")
+async def upload_style_reference(
+    job_id: str,
+    file: UploadFile = File(...),
+) -> dict[str, str]:
+    """Upload a reference OTIO file for style extraction.
+
+    The file is stored and style will be extracted during pipeline processing.
+    """
+    job_repo = JobRepository.create()
+    job = await job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if file.filename is None or not file.filename.lower().endswith(".otio"):
+        raise HTTPException(status_code=400, detail="File must be an .otio file")
+
+    gridfs = get_gridfs_service()
+
+    # Upload OTIO to GridFS (style extraction happens in pipeline)
+    stored = await gridfs.upload_stream(
+        stream=_stream_upload_file(file),
+        filename=file.filename,
+        file_type=FileType.OTIO_ARTIFACT,
+        content_type="application/json",
+        project_id=job_id,
+    )
+
+    # Store reference file ID in job
+    await job_repo.set_style_profile(
+        job_id,
+        style_profile_json=None,
+        reference_otio_file_id=stored.file_id,
+    )
+
+    return {
+        "status": "success",
+        "message": "Reference uploaded",
+        "reference_file_id": stored.file_id,
+    }
+
+
+@router.post("/{job_id}/start", response_model=JobResponse)
+async def start_job(
+    job_id: str,
+    request: StartJobRequest,
+    background_tasks: BackgroundTasks,
+) -> JobResponse:
+    """Start processing a job."""
+    job_repo = JobRepository.create()
+    job = await job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Check if job is already running
+    if job.stage not in (JobStage.CREATED, JobStage.COMPLETED, JobStage.FAILED, JobStage.CANCELLED):
+        raise HTTPException(
+            status_code=409,
+            detail="Job is already running",
+        )
+
+    # Count total files
+    total_files = len(job.video_file_ids) + len(job.audio_file_ids)
+    if total_files == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No files uploaded to job",
+        )
+
+    # Start processing
+    job = await job_repo.start_processing(
+        job_id=job_id,
+        total_files=total_files,
+        target_frame_rate=request.target_frame_rate,
+        style_profile_text=request.style_profile_text,
+    )
+
+    # Start job in background
+    runner = JobRunner(job_id=job_id)
+    background_tasks.add_task(_run_job, runner)
+
+    return _to_response(job)  # pyright: ignore[reportArgumentType]
+
+
+async def _run_job(runner: JobRunner) -> None:
+    """Run a job asynchronously."""
+    try:
+        await runner.run()
+    except Exception as e:
+        # Error is already logged and stored by the runner
+        print(f"Job failed with error: {e}")  # noqa: T201
+
+
+@router.post("/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict[str, str]:
+    """Cancel a running job."""
+    job_repo = JobRepository.create()
+    job = await job_repo.get_job(job_id)
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.stage in (JobStage.CREATED, JobStage.COMPLETED, JobStage.FAILED, JobStage.CANCELLED):
+        raise HTTPException(status_code=400, detail="Job is not running")
+
+    await job_repo.update_stage(job_id, JobStage.CANCELLED)
+
+    return {"status": "cancelled", "job_id": job_id}
+
+
+@router.post("/{job_id}/resume", response_model=JobResponse)
+async def resume_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+) -> JobResponse:
+    """Resume a stuck job (e.g., after server restart).
+
+    This restarts the pipeline from where it left off using checkpoints.
+    """
+    job_repo = JobRepository.create()
+    job = await job_repo.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Only allow resuming jobs that are in intermediate stages (stuck)
+    stuck_stages = {
+        JobStage.QUEUED,
+        JobStage.DOWNLOADING_FILES,
+        JobStage.ANNOTATING_ASSETS,
+        JobStage.PLANNING_EDITS,
+        JobStage.EXECUTING_TIMELINE,
+        JobStage.UPLOADING_RESULT,
+    }
+
+    if job.stage not in stuck_stages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job cannot be resumed from stage: {job.stage}. Use start for new jobs or restart for completed/failed jobs.",
+        )
+
+    # Reset to QUEUED stage to restart pipeline
+    job = await job_repo.update_stage(job_id, JobStage.QUEUED)
+
+    # Start job in background (will use checkpoints to skip completed stages)
+    runner = JobRunner(job_id=job_id)
+    background_tasks.add_task(_run_job, runner)
+
+    return _to_response(job)  # pyright: ignore[reportArgumentType]
+
+
+@router.get("/{job_id}/download")
+async def download_otio(job_id: str) -> StreamingResponse:
+    """Download the OTIO file for a job."""
+    job_repo = JobRepository.create()
+    job = await job_repo.get_job(job_id)
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.otio_file_id is None:
+        raise HTTPException(status_code=404, detail="OTIO file not yet generated")
+
+    gridfs = get_gridfs_service()
+    content = await gridfs.download_bytes(job.otio_file_id)
+
+    return StreamingResponse(
+        iter([content]),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="reflect_edit_{job_id}.otio"'},
+    )

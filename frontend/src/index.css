@@ -1,0 +1,202 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-white/[0.06];
+  }
+
+  html {
+    @apply antialiased;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-void text-white font-sans;
+    background-image:
+      radial-gradient(ellipse at top, rgba(0, 240, 255, 0.03) 0%, transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(255, 184, 0, 0.02) 0%, transparent 50%);
+  }
+
+  ::selection {
+    @apply bg-accent-cyan/20 text-white;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    @apply w-1.5 h-1.5;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-white/10 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-white/20;
+  }
+}
+
+@layer components {
+  /* Terminal-style label */
+  .label {
+    @apply text-[10px] uppercase tracking-widest font-mono text-white/40;
+  }
+
+  /* Heading with tight tracking */
+  .heading {
+    @apply font-semibold tracking-tighter;
+  }
+
+  /* Glassmorphism card */
+  .glass-card {
+    @apply relative bg-white/[0.02] backdrop-blur-sm border border-white/[0.06] rounded-lg;
+    @apply shadow-inner-glow;
+  }
+
+  .glass-card::before {
+    content: '';
+    @apply absolute inset-0 rounded-lg pointer-events-none;
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.03) 0%,
+      transparent 50%
+    );
+  }
+
+  /* Glow container */
+  .glow-container {
+    @apply relative;
+  }
+
+  .glow-container::before {
+    content: '';
+    @apply absolute -inset-px rounded-lg opacity-0 transition-opacity duration-500;
+    background: linear-gradient(
+      135deg,
+      rgba(0, 240, 255, 0.1) 0%,
+      transparent 50%,
+      rgba(255, 184, 0, 0.05) 100%
+    );
+  }
+
+  .glow-container:hover::before {
+    @apply opacity-100;
+  }
+
+  /* Shimmer button */
+  .btn-shimmer {
+    @apply relative overflow-hidden;
+  }
+
+  .btn-shimmer::before {
+    content: '';
+    @apply absolute inset-0 bg-shimmer bg-shimmer animate-shimmer;
+  }
+
+  /* Terminal input */
+  .terminal-input {
+    @apply bg-white/[0.03] border border-white/[0.06] rounded px-4 py-3;
+    @apply text-white placeholder-white/30 font-mono text-sm;
+    @apply focus:outline-none focus:border-accent-cyan/50 focus:shadow-glow-sm;
+    @apply transition-all duration-200;
+  }
+
+  /* Data grid pattern background */
+  .grid-bg {
+    @apply bg-grid-pattern bg-grid;
+  }
+
+  /* Neon text */
+  .text-glow-cyan {
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.5), 0 0 20px rgba(0, 240, 255, 0.3);
+  }
+
+  .text-glow-amber {
+    text-shadow: 0 0 10px rgba(255, 184, 0, 0.5), 0 0 20px rgba(255, 184, 0, 0.3);
+  }
+
+  /* Bento grid */
+  .bento-grid {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+
+  /* Skeleton loader - terminal style */
+  .skeleton {
+    @apply relative overflow-hidden bg-white/[0.03] rounded;
+  }
+
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.03) 50%,
+      transparent 100%
+    );
+    animation: skeleton-sweep 1.5s ease-in-out infinite;
+  }
+
+  @keyframes skeleton-sweep {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+
+  /* Status indicator */
+  .status-dot {
+    @apply w-1.5 h-1.5 rounded-full;
+  }
+
+  .status-dot.active {
+    @apply bg-accent-cyan shadow-glow-sm animate-glow-pulse;
+  }
+
+  .status-dot.warning {
+    @apply bg-accent-amber shadow-glow-amber;
+  }
+
+  .status-dot.idle {
+    @apply bg-white/20;
+  }
+
+  /* Divider with fade */
+  .divider {
+    @apply h-px w-full;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.1) 50%,
+      transparent 100%
+    );
+  }
+
+  /* Terminal cursor */
+  .cursor {
+    @apply inline-block w-2 h-4 bg-accent-cyan ml-1 animate-terminal-blink;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #fff 0%, rgba(255,255,255,0.6) 100%);
+  }
+
+  .border-gradient {
+    border-image: linear-gradient(
+      135deg,
+      rgba(0, 240, 255, 0.3) 0%,
+      rgba(255, 255, 255, 0.1) 50%,
+      rgba(255, 184, 0, 0.2) 100%
+    ) 1;
+  }
+}
