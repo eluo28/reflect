@@ -25,6 +25,7 @@ class JobResponse(BaseReflectModel):
     # Checkpoint IDs for resume support
     manifest_id: str | None = None
     blueprint_id: str | None = None
+    has_style_profile: bool = False
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None

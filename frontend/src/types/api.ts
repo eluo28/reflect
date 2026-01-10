@@ -14,6 +14,7 @@ export interface Job {
   // Checkpoint IDs for resume support
   manifest_id: string | null;
   blueprint_id: string | null;
+  has_style_profile: boolean;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

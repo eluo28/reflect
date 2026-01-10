@@ -56,6 +56,7 @@ def _to_response(doc: JobDocument) -> JobResponse:
         otio_file_id=doc.otio_file_id,
         manifest_id=doc.manifest_id,
         blueprint_id=doc.blueprint_id,
+        has_style_profile=doc.style_profile_json is not None,
         created_at=doc.created_at,
         started_at=doc.started_at,
         completed_at=doc.completed_at,

@@ -1,5 +1,6 @@
 """EditPlanner service for creating timeline blueprints."""
 
+import asyncio
 from pathlib import Path
 
 from src.asset_annotator.schemas import VideoAssetAnnotation
@@ -10,8 +11,15 @@ from src.edit_planner.clip_agents import (
     PacingAgent,
     QualityFilterAgent,
 )
-from src.edit_planner.clip_agents.dialogue_classifier import ClipClassification
-from src.edit_planner.clip_agents.quality_filter import QualityDecision
+from src.edit_planner.clip_agents.cut_point_agent import CutPointDecision
+from src.edit_planner.clip_agents.dialogue_classifier import (
+    ClipClassification,
+    DialogueClassifierResult,
+)
+from src.edit_planner.clip_agents.quality_filter import (
+    QualityDecision,
+    QualityFilterResult,
+)
 from src.edit_planner.schemas import (
     AssemblyInput,
     AudioMixLevel,
@@ -62,6 +70,11 @@ class EditPlannerService:
 
         # Prepare clips for assembly
         clips = self._prepare_clips(assembly_input.manifest.video_assets)
+
+        # Pre-classify all clips in parallel (LLM calls)
+        print(f"[EditPlanner] Pre-classifying {len(clips)} clips in parallel...")
+        clip_classifications = self._classify_clips_parallel(clips)
+        print(f"[EditPlanner] Classification complete")
 
         # Process each chunk with dynamic pacing
         chunk_decisions_list: list[ChunkDecisions] = []
@@ -124,6 +137,7 @@ class EditPlannerService:
                 style,
                 pacing.target_avg_duration_seconds,
                 chunk_beats,
+                clip_classifications,
             )
             chunk_decisions_list.append(decisions)
 
@@ -221,6 +235,7 @@ class EditPlannerService:
         style: StyleProfile | None,
         target_clip_duration: float,
         chunk_beats: list[float],
+        clip_classifications: dict[int, DialogueClassifierResult],
     ) -> ChunkDecisions:
         """Process a single chunk and create cut decisions."""
         decisions = self._create_cut_decisions(
@@ -229,6 +244,7 @@ class EditPlannerService:
             style,
             target_clip_duration,
             chunk_beats,
+            clip_classifications,
         )
 
         return ChunkDecisions(
@@ -245,40 +261,75 @@ class EditPlannerService:
         style: StyleProfile | None,
         target_clip_duration: float,
         chunk_beats: list[float],
+        clip_classifications: dict[int, DialogueClassifierResult],
     ) -> list[CutDecision]:
-        """Create cut decisions using agents and beat alignment."""
-        decisions: list[CutDecision] = []
-        current_timeline = timeline_cursor
+        """Create cut decisions using agents and beat alignment.
 
-        # Determine if we should align to beats
+        Runs quality filter and cut point agents in parallel for all clips.
+        """
+        clips = chunk_context.clips_in_chunk
+        if not clips:
+            return []
+
+        chunk_duration = chunk_context.chunk_duration_seconds
         align_to_beats = style.prefer_beat_alignment if style else True
 
-        for clip in chunk_context.clips_in_chunk:
-            # Use quality filter agent
-            quality_result = self._quality_filter.evaluate(
-                clip,
-                chunk_context.chunk_duration_seconds,
-            )
+        # Step 1: Run quality filter for all clips in parallel
+        quality_results: dict[int, QualityFilterResult] = {}
 
-            if quality_result.decision == QualityDecision.SKIP:
-                print(f"  Skipping clip {clip.clip_index}: {quality_result.reasoning}")
-                continue
+        def filter_one(clip: ClipForAssembly) -> tuple[int, QualityFilterResult]:
+            result = self._quality_filter.evaluate(clip, chunk_duration)
+            return clip.clip_index, result
 
-            # Use dialogue classifier agent
-            classification_result = self._dialogue_classifier.classify(clip)
-            is_dialogue = (
-                classification_result.classification == ClipClassification.DIALOGUE
-            )
-            clip_type = ClipType.DIALOGUE if is_dialogue else ClipType.BROLL
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(filter_one, clip) for clip in clips]
+            for future in as_completed(futures):
+                clip_index, result = future.result()
+                quality_results[clip_index] = result
 
-            # Use cut point agent to find optimal in/out points
-            cut_points = self._cut_point_agent.find_cut_points(
+        # Filter to clips that pass quality check
+        passing_clips = [
+            clip for clip in clips
+            if quality_results[clip.clip_index].decision != QualityDecision.SKIP
+        ]
+
+        for clip in clips:
+            if quality_results[clip.clip_index].decision == QualityDecision.SKIP:
+                print(f"  Skipping clip {clip.clip_index}: {quality_results[clip.clip_index].reasoning}")
+
+        if not passing_clips:
+            return []
+
+        # Step 2: Run cut point agent for all passing clips in parallel
+        cut_point_results: dict[int, CutPointDecision] = {}
+
+        def cut_one(clip: ClipForAssembly) -> tuple[int, CutPointDecision]:
+            classification = clip_classifications[clip.clip_index]
+            is_dialogue = classification.classification == ClipClassification.DIALOGUE
+            result = self._cut_point_agent.find_cut_points(
                 clip=clip,
                 target_duration_seconds=target_clip_duration,
                 is_dialogue=is_dialogue,
                 style_profile=style,
             )
+            return clip.clip_index, result
 
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(cut_one, clip) for clip in passing_clips]
+            for future in as_completed(futures):
+                clip_index, result = future.result()
+                cut_point_results[clip_index] = result
+
+        # Step 3: Assemble decisions sequentially (for timeline ordering)
+        decisions: list[CutDecision] = []
+        current_timeline = timeline_cursor
+
+        for clip in passing_clips:
+            classification = clip_classifications[clip.clip_index]
+            is_dialogue = classification.classification == ClipClassification.DIALOGUE
+            clip_type = ClipType.DIALOGUE if is_dialogue else ClipType.BROLL
+
+            cut_points = cut_point_results[clip.clip_index]
             source_in = cut_points.source_in_seconds
             source_out = cut_points.source_out_seconds
 
@@ -351,3 +402,31 @@ class EditPlannerService:
             return nearest_beat
 
         return time_seconds
+
+    def _classify_clips_parallel(
+        self,
+        clips: list[ClipForAssembly],
+        max_workers: int = 8,
+    ) -> dict[int, DialogueClassifierResult]:
+        """Classify all clips in parallel using thread pool.
+
+        Args:
+            clips: List of clips to classify.
+            max_workers: Maximum number of parallel workers.
+
+        Returns:
+            Dict mapping clip_index to classification result.
+        """
+        results: dict[int, DialogueClassifierResult] = {}
+
+        def classify_one(clip: ClipForAssembly) -> tuple[int, DialogueClassifierResult]:
+            result = self._dialogue_classifier.classify(clip)
+            return clip.clip_index, result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(classify_one, clip): clip for clip in clips}
+            for future in as_completed(futures):
+                clip_index, classification = future.result()
+                results[clip_index] = classification
+
+        return results

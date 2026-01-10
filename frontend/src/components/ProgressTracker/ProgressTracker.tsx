@@ -14,6 +14,8 @@ interface ProgressTrackerProps {
   hasManifest?: boolean;
   /** Checkpoint: blueprint exists (planning complete) */
   hasBlueprint?: boolean;
+  /** Checkpoint: style profile extracted */
+  hasStyleProfile?: boolean;
 }
 
 const STAGES: { key: PipelineStage; label: string; description: string }[] = [
@@ -24,7 +26,7 @@ const STAGES: { key: PipelineStage; label: string; description: string }[] = [
   { key: 'completed', label: 'Done', description: 'Export ready' },
 ];
 
-export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, hasBlueprint = false }: ProgressTrackerProps) {
+export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, hasBlueprint = false, hasStyleProfile = false }: ProgressTrackerProps) {
   const {
     stage: wsStage,
     progressPercent: wsProgressPercent,
@@ -151,7 +153,7 @@ export function ProgressTracker({ jobId, isStuck = false, hasManifest = false, h
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <span className={clsx("text-xs truncate", isStuck ? "text-amber-400/70" : "text-white/40")}>
               {isStuck && !currentItem && !message
-                ? `Paused at checkpoint${hasBlueprint ? ' (planning complete)' : hasManifest ? ' (analysis complete)' : ''}`
+                ? `Paused at checkpoint${hasBlueprint ? ' (planning complete)' : hasStyleProfile ? ' (style extracted)' : hasManifest ? ' (analysis complete)' : ''}`
                 : currentItem || message || 'Initializing...'}
             </span>
           </div>

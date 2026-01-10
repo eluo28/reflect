@@ -523,6 +523,7 @@ export function JobDetailPage() {
                       isStuck={isJobProcessing && !isProcessing}
                       hasManifest={currentJob.manifest_id != null}
                       hasBlueprint={currentJob.blueprint_id != null}
+                      hasStyleProfile={currentJob.has_style_profile}
                     />
                     {/* Show Resume button for stuck jobs (processing stage but no active progress) */}
                     {isJobProcessing && !isProcessing && (
