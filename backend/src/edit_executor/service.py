@@ -43,9 +43,15 @@ class EditExecutorService:
         video_track = self._create_video_track(blueprint)
         timeline.tracks.append(video_track)
 
-        # Create audio tracks
+        # Create audio tracks with dialogue ducking
+        dialogue_sections = [
+            (d.timeline_in_seconds, d.timeline_out_seconds)
+            for d in blueprint.dialogue_decisions
+        ]
         for audio_info in blueprint.audio_tracks:
-            audio_track = self._create_audio_track(audio_info, blueprint.frame_rate)
+            audio_track = self._create_audio_track_with_ducking(
+                audio_info, blueprint.frame_rate, dialogue_sections
+            )
             timeline.tracks.append(audio_track)
 
         return timeline
@@ -150,12 +156,23 @@ class EditExecutorService:
 
         return clip
 
-    def _create_audio_track(
+    def _create_audio_track_with_ducking(
         self,
         audio_info: AudioTrackInfo,
         frame_rate: float,
+        dialogue_sections: list[tuple[float, float]],
     ) -> otio.schema.Track:
-        """Create an audio track from AudioTrackInfo."""
+        """Create an audio track with volume ducking during dialogue.
+
+        Args:
+            audio_info: Audio track configuration.
+            frame_rate: Timeline frame rate.
+            dialogue_sections: List of (start, end) times for dialogue clips.
+                Music is ducked to 30% during these sections.
+
+        Returns:
+            OTIO track with segmented clips for ducking.
+        """
         audio_track = otio.schema.Track(
             name=f"Audio - {audio_info.file_path.stem}",
             kind=otio.schema.TrackKind.Audio,
@@ -166,36 +183,107 @@ class EditExecutorService:
             gap = self._create_gap(audio_info.timeline_in_seconds, frame_rate)
             audio_track.append(gap)
 
-        # Create the audio clip
-        media_ref = otio.schema.ExternalReference(
-            target_url=str(audio_info.file_path.absolute()),
-        )
+        # Build volume segments based on dialogue sections
+        audio_start = audio_info.timeline_in_seconds
+        audio_end = audio_info.source_out_seconds - audio_info.source_in_seconds + audio_start
 
-        source_duration = audio_info.source_out_seconds - audio_info.source_in_seconds
-        source_range = otio.opentime.TimeRange(
-            start_time=otio.opentime.RationalTime(
-                audio_info.source_in_seconds * frame_rate,
-                frame_rate,
-            ),
-            duration=otio.opentime.RationalTime(
-                source_duration * frame_rate,
-                frame_rate,
-            ),
-        )
+        # Merge overlapping dialogue sections and sort
+        merged_dialogue = self._merge_overlapping_sections(dialogue_sections)
 
-        clip = otio.schema.Clip(
-            name=audio_info.file_path.stem,
-            media_reference=media_ref,
-            source_range=source_range,
-        )
+        # Create segments with appropriate volumes
+        segments: list[tuple[float, float, float]] = []  # (start, end, volume)
+        current_pos = audio_start
 
-        # Add volume metadata
-        clip.metadata["reflect"] = {
-            "volume": audio_info.volume,
-        }
+        for d_start, d_end in merged_dialogue:
+            # Clip dialogue section to audio bounds
+            d_start = max(d_start, audio_start)
+            d_end = min(d_end, audio_end)
 
-        audio_track.append(clip)
+            if d_start >= audio_end or d_end <= audio_start:
+                continue  # Outside audio range
+
+            # Add full volume segment before dialogue (if any)
+            if d_start > current_pos:
+                segments.append((current_pos, d_start, 1.0))
+
+            # Add ducked segment for dialogue
+            if d_end > d_start:
+                segments.append((d_start, d_end, 0.3))
+
+            current_pos = d_end
+
+        # Add final full volume segment (if any)
+        if current_pos < audio_end:
+            segments.append((current_pos, audio_end, 1.0))
+
+        # If no segments (no dialogue), just add the full track at full volume
+        if not segments:
+            segments.append((audio_start, audio_end, 1.0))
+
+        # Create clips for each segment
+        source_cursor = audio_info.source_in_seconds
+        for seg_start, seg_end, volume in segments:
+            seg_duration = seg_end - seg_start
+            if seg_duration <= 0:
+                continue
+
+            media_ref = otio.schema.ExternalReference(
+                target_url=str(audio_info.file_path.absolute()),
+            )
+
+            source_range = otio.opentime.TimeRange(
+                start_time=otio.opentime.RationalTime(
+                    source_cursor * frame_rate,
+                    frame_rate,
+                ),
+                duration=otio.opentime.RationalTime(
+                    seg_duration * frame_rate,
+                    frame_rate,
+                ),
+            )
+
+            clip = otio.schema.Clip(
+                name=f"{audio_info.file_path.stem}_vol{int(volume*100)}",
+                media_reference=media_ref,
+                source_range=source_range,
+            )
+
+            # Add volume metadata
+            clip.metadata["reflect"] = {
+                "volume": volume,
+                "ducked": volume < 1.0,
+            }
+
+            audio_track.append(clip)
+            source_cursor += seg_duration
+
         return audio_track
+
+    def _merge_overlapping_sections(
+        self,
+        sections: list[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        """Merge overlapping time sections."""
+        if not sections:
+            return []
+
+        # Sort by start time
+        sorted_sections = sorted(sections, key=lambda x: x[0])
+
+        merged: list[tuple[float, float]] = []
+        current_start, current_end = sorted_sections[0]
+
+        for start, end in sorted_sections[1:]:
+            if start <= current_end:
+                # Overlapping or adjacent, extend the current section
+                current_end = max(current_end, end)
+            else:
+                # Non-overlapping, save current and start new
+                merged.append((current_start, current_end))
+                current_start, current_end = start, end
+
+        merged.append((current_start, current_end))
+        return merged
 
     def _create_gap(
         self,

@@ -135,6 +135,18 @@ class EditPlannerService:
         clip_classifications = self._classify_clips_parallel(clips)
         print(f"[EditPlanner] Classification complete")
 
+        # Log dialogue classifications for debugging
+        for clip in clips:
+            result = clip_classifications[clip.clip_index]
+            clip_name = Path(clip.file_path).stem
+            rot = clip.rotation_degrees or 0
+            print(
+                f"  [Classification] Clip {clip.clip_index} ({clip_name}): "
+                f"{result.classification} | duration={clip.duration_seconds:.1f}s | "
+                f"speech_conf={clip.speech_confidence or 0:.0%} | rotation={rot}° | "
+                f"{result.reasoning[:60]}..."
+            )
+
         # Process each chunk with dynamic pacing
         chunk_decisions_list: list[ChunkDecisions] = []
         timeline_cursor = 0.0
@@ -148,11 +160,13 @@ class EditPlannerService:
             chunk_end = chunk_boundaries[chunk_idx + 1]
             chunk_duration = chunk_end - chunk_start
 
-            # Get beats within this chunk for alignment
+            # Get beats within this chunk for alignment (include some padding)
+            # Include beats slightly before chunk_start and after chunk_end for edge alignment
+            beat_padding = 2.0  # seconds of padding
             chunk_beats = [
                 b.time_seconds
                 for b in beat_grid
-                if chunk_start <= b.time_seconds < chunk_end
+                if (chunk_start - beat_padding) <= b.time_seconds <= (chunk_end + beat_padding)
             ]
 
             # Determine how many clips remain
@@ -160,22 +174,23 @@ class EditPlannerService:
             if remaining_clips <= 0:
                 continue
 
-            # Use pacing agent to decide how many clips for this chunk
-            pacing = self._pacing_agent.decide_pacing(
-                chunk_duration_seconds=chunk_duration,
-                available_clip_count=remaining_clips,
-                style_profile=style,
-                chunk_index=chunk_idx,
-                total_chunks=total_chunks,
-            )
+            # Pacing - DISABLED for speed (using simple calculation instead)
+            # Previously used LLM to decide pacing dynamically
+            target_cut_duration = style.pacing.avg_clip_duration_seconds if style else 3.0
+            target_clip_count = max(1, int(chunk_duration / target_cut_duration))
+            # Don't use more clips than we have remaining, distribute evenly
+            remaining_chunks = total_chunks - chunk_idx
+            clips_per_chunk = max(1, remaining_clips // remaining_chunks)
+            target_clip_count = min(target_clip_count, clips_per_chunk)
+            target_avg_duration = chunk_duration / target_clip_count if target_clip_count > 0 else chunk_duration
 
             print(
-                f"  Chunk {chunk_idx}: {pacing.target_clip_count} clips, "
-                f"avg {pacing.target_avg_duration_seconds:.1f}s"
+                f"  Chunk {chunk_idx}: {target_clip_count} clips, "
+                f"avg {target_avg_duration:.1f}s, {len(chunk_beats)} beats available"
             )
 
             # Select clips for this chunk
-            clip_count = min(pacing.target_clip_count, remaining_clips)
+            clip_count = min(target_clip_count, remaining_clips)
             chunk_clips = clips[clip_cursor : clip_cursor + clip_count]
             clip_cursor += clip_count
 
@@ -194,7 +209,7 @@ class EditPlannerService:
                 chunk_context,
                 timeline_cursor,
                 style,
-                pacing.target_avg_duration_seconds,
+                target_avg_duration,
                 chunk_beats,
                 clip_classifications,
             )
@@ -371,16 +386,33 @@ class EditPlannerService:
                 source_out = min(clip.duration_seconds, source_in + 0.5)
 
             clip_duration = source_out - source_in
-            timeline_out = current_timeline + clip_duration
 
-            # Beat alignment: snap timeline_out to nearest beat if enabled
+            # Beat alignment: snap BOTH timeline_in and timeline_out to beats
             if align_to_beats and chunk_beats and not is_dialogue:
-                timeline_out = self._snap_to_beat(timeline_out, chunk_beats)
-                # Adjust source_out to match new duration
-                new_clip_duration = timeline_out - current_timeline
-                if new_clip_duration > 0.3:  # Minimum duration check
+                # Find the beat at or just before current_timeline for timeline_in
+                timeline_in_beat = self._snap_to_nearest_beat(current_timeline, chunk_beats)
+
+                # Find the next beat after timeline_in for timeline_out
+                timeline_out_ideal = timeline_in_beat + clip_duration
+                timeline_out_beat = self._snap_to_next_beat(timeline_out_ideal, chunk_beats)
+
+                # Ensure minimum duration (at least half a beat gap)
+                if timeline_out_beat - timeline_in_beat >= 0.25:
+                    old_in = current_timeline
+                    old_dur = clip_duration
+                    current_timeline = timeline_in_beat
+                    new_clip_duration = timeline_out_beat - timeline_in_beat
+                    # Adjust source_out to match beat-aligned duration
                     source_out = source_in + new_clip_duration
                     source_out = min(clip.duration_seconds, source_out)
+                    clip_duration = source_out - source_in
+                    print(
+                        f"    [BeatAlign] Clip {clip.clip_index}: "
+                        f"in {old_in:.2f}→{current_timeline:.2f}s, "
+                        f"dur {old_dur:.2f}→{clip_duration:.2f}s"
+                    )
+
+            timeline_out = current_timeline + clip_duration
 
             # Set audio level based on clip type
             audio_level = AudioMixLevel.FULL if is_dialogue else AudioMixLevel.MUTED
@@ -410,7 +442,7 @@ class EditPlannerService:
     async def _run_chunk_agents_async(
         self,
         clips: list[ClipForAssembly],
-        chunk_duration: float,
+        _chunk_duration: float,  # Unused since quality filter disabled
         target_clip_duration: float,
         clip_classifications: dict[int, DialogueClassifierResult],
         style: StyleProfile | None,
@@ -424,16 +456,16 @@ class EditPlannerService:
         Returns:
             Tuple of (quality_results, cut_point_results, passing_clips)
         """
-        # Step 1: Run quality filter for all clips concurrently (with rate limiting)
-        async def filter_one(clip: ClipForAssembly) -> tuple[int, QualityFilterResult]:
-            result: QualityFilterResult = await _with_retry(
-                self._quality_filter.evaluate_async, clip, chunk_duration
+        # Step 1: Quality filter - DISABLED for speed (all clips pass)
+        # Previously used LLM to evaluate clip quality, but it's too slow
+        quality_results: dict[int, QualityFilterResult] = {
+            clip.clip_index: QualityFilterResult(
+                decision=QualityDecision.INCLUDE,
+                confidence=1.0,
+                reasoning="Quality filter disabled for speed",
             )
-            return clip.clip_index, result
-
-        quality_tasks = [filter_one(clip) for clip in clips]
-        quality_results_list = await asyncio.gather(*quality_tasks)
-        quality_results = dict(quality_results_list)
+            for clip in clips
+        }
 
         # Filter to clips that pass quality check
         passing_clips = [
@@ -490,6 +522,50 @@ class EditPlannerService:
             return nearest_beat
 
         return time_seconds
+
+    def _snap_to_nearest_beat(
+        self,
+        time_seconds: float,
+        beats: list[float],
+    ) -> float:
+        """Snap a time to the nearest beat (no tolerance - always snaps).
+
+        Args:
+            time_seconds: The time to snap.
+            beats: List of beat times in seconds.
+
+        Returns:
+            The nearest beat time.
+        """
+        if not beats:
+            return time_seconds
+
+        return min(beats, key=lambda b: abs(b - time_seconds))
+
+    def _snap_to_next_beat(
+        self,
+        time_seconds: float,
+        beats: list[float],
+    ) -> float:
+        """Find the next beat at or after the given time.
+
+        Args:
+            time_seconds: The time to find the next beat after.
+            beats: List of beat times in seconds.
+
+        Returns:
+            The next beat time at or after time_seconds.
+        """
+        if not beats:
+            return time_seconds
+
+        # Find beats at or after time_seconds
+        future_beats = [b for b in beats if b >= time_seconds - 0.05]  # Small tolerance
+        if future_beats:
+            return min(future_beats)
+
+        # If no future beats, return the last beat
+        return max(beats)
 
     def _classify_clips_parallel(
         self,
