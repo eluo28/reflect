@@ -229,62 +229,73 @@ class GridFSService:
         stream = await self.bucket.open_download_stream(ObjectId(file_id))
         return await stream.read()
 
-    def _get_cache_path(self, file_id: str) -> Path:
-        """Get the local cache path for a file.
+    def _get_cache_path_by_filename(self, filename: str) -> Path:
+        """Get the local cache path for a file by filename.
 
-        Uses subdirectories based on first 2 chars of file_id to avoid
-        too many files in a single directory.
+        This allows cache hits across different projects with the same filename.
 
         Args:
-            file_id: The GridFS file ID.
+            filename: The original filename.
 
         Returns:
             Path where the file should be cached.
         """
         client = get_mongodb_client()
         cache_dir = Path(client.config.file_cache_dir).expanduser()
-        # Use first 2 chars as subdir to distribute files
-        return cache_dir / file_id[:2] / file_id
+        # Cache by filename for cross-project reuse
+        return cache_dir / "by_name" / filename
 
     def _is_cache_enabled(self) -> bool:
         """Check if file caching is enabled."""
         client = get_mongodb_client()
         return client.config.file_cache_enabled
 
-    async def cache_file(self, file_id: str, data: bytes) -> None:
-        """Write file data to local cache.
+    async def cache_file_by_name(self, filename: str, data: bytes) -> None:
+        """Write file data to local cache, keyed by filename.
+
+        This allows cache reuse across different projects with the same filename.
 
         Args:
-            file_id: The GridFS file ID (used as cache key).
+            filename: The original filename (used as cache key).
             data: The file contents to cache.
         """
         if not self._is_cache_enabled():
             return
 
-        cache_path = self._get_cache_path(file_id)
+        cache_path = self._get_cache_path_by_filename(filename)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(data)
-        logger.debug("Cached file %s to %s", file_id, cache_path)
+        logger.debug("Cached file by name '%s' to %s", filename, cache_path)
 
     async def download_file_cached(
         self,
         file_id: str,
         destination_path: Path,
+        filename: str | None = None,
     ) -> tuple[Path, bool]:
-        """Download a file from GridFS, checking local cache first.
+        """Download a file from GridFS, checking local cache first by filename.
+
+        Cache is keyed by filename, allowing reuse across different projects
+        with the same source files.
 
         Args:
             file_id: The GridFS file ID.
             destination_path: Where to save the file.
+            filename: Original filename for cache lookup (fetched from GridFS if not provided).
 
         Returns:
             Tuple of (path to file, was_cached).
         """
         destination_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Check cache first
+        # Get filename for cache lookup if not provided
+        if filename is None:
+            file_info = await self.get_file_info(file_id)
+            filename = file_info.filename if file_info else file_id
+
+        # Check filename-based cache first
         if self._is_cache_enabled():
-            cache_path = self._get_cache_path(file_id)
+            cache_path = self._get_cache_path_by_filename(filename)
             if cache_path.exists():
                 shutil.copy(cache_path, destination_path)
                 return destination_path, True
@@ -293,9 +304,9 @@ class GridFSService:
         with destination_path.open("wb") as f:
             await self.bucket.download_to_stream(ObjectId(file_id), f)
 
-        # Store in cache for next time
+        # Store in filename-based cache for next time
         if self._is_cache_enabled():
-            cache_path = self._get_cache_path(file_id)
+            cache_path = self._get_cache_path_by_filename(filename)
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(destination_path, cache_path)
 
@@ -359,6 +370,32 @@ class GridFSService:
             )
 
         return files
+
+    async def find_by_filename(self, filename: str) -> StoredFileInfo | None:
+        """Find the most recent file with the given filename.
+
+        Useful for local demo to skip re-uploading same files.
+
+        Args:
+            filename: The filename to search for.
+
+        Returns:
+            StoredFileInfo if found, None otherwise.
+        """
+        # Find most recent file with this filename
+        cursor = self.bucket.find({"filename": filename}).sort("uploadDate", -1).limit(1)
+
+        async for grid_out in cursor:
+            metadata = grid_out.metadata or {}
+            return StoredFileInfo(
+                file_id=str(grid_out._id),
+                filename=grid_out.filename,
+                file_type=FileType(metadata.get("file_type", FileType.VIDEO_CLIP)),
+                content_type=metadata.get("content_type", "application/octet-stream"),
+                size_bytes=grid_out.length,
+                project_id=metadata.get("project_id"),
+            )
+        return None
 
     def _get_content_type(self, file_path: Path) -> str:
         """Determine content type from file extension."""

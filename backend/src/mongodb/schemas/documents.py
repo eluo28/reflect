@@ -21,6 +21,9 @@ class ManifestDocument(BaseModel):
     audio_count: int
     total_duration_seconds: float
 
+    # Hash of sorted filenames for reuse across jobs
+    files_hash: str | None = None
+
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

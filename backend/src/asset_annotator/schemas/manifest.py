@@ -17,6 +17,8 @@ class VideoAssetAnnotation(BaseReflectModel):
     duration_seconds: float
     ear_analysis: EarAnalysis
     eye_analysis: EyeAnalysis
+    # Rotation in degrees (0, 90, 180, 270) from video metadata
+    rotation_degrees: int = 0
 
 
 class AudioAssetAnnotation(BaseReflectModel):

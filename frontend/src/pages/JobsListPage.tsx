@@ -1,10 +1,31 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowRight, Briefcase, Clock, CheckCircle, AlertCircle, Loader2, Film, Music, Download, Trash2, Plus } from 'lucide-react';
+import { ArrowRight, Briefcase, Clock, CheckCircle, AlertCircle, Loader2, Film, Music, Download, Trash2, Plus, Pause } from 'lucide-react';
 import { createJob, listJobs, deleteJob } from '../api/client';
 import { GlassCard, Button } from '../components/ui';
 import type { Job } from '../types/api';
+
+// Consider a job stuck if it's in processing state but hasn't updated in 30 seconds
+const STUCK_THRESHOLD_MS = 30_000;
+
+function isJobStuck(job: Job): boolean {
+  const processingStages = ['queued', 'downloading_files', 'annotating_assets', 'planning_edits', 'executing_timeline', 'uploading_result'];
+  const stage = job.stage.toLowerCase();
+
+  if (!processingStages.includes(stage)) {
+    return false;
+  }
+
+  // Queued jobs are waiting, not stuck (give them more time)
+  if (stage === 'queued') {
+    const timeSinceUpdate = Date.now() - new Date(job.updated_at).getTime();
+    return timeSinceUpdate > STUCK_THRESHOLD_MS * 2; // 60 seconds for queued
+  }
+
+  const timeSinceUpdate = Date.now() - new Date(job.updated_at).getTime();
+  return timeSinceUpdate > STUCK_THRESHOLD_MS;
+}
 
 export function JobsListPage() {
   const navigate = useNavigate();
@@ -62,8 +83,12 @@ export function JobsListPage() {
     navigate(`/jobs/${job.id}`);
   };
 
-  const getStatusIcon = (stage: string) => {
-    switch (stage.toLowerCase()) {
+  const getStatusIcon = (job: Job) => {
+    if (isJobStuck(job)) {
+      return <Pause className="w-3.5 h-3.5 text-amber-400" />;
+    }
+
+    switch (job.stage.toLowerCase()) {
       case 'completed':
         return <CheckCircle className="w-3.5 h-3.5 text-accent-cyan" />;
       case 'failed':
@@ -76,8 +101,12 @@ export function JobsListPage() {
     }
   };
 
-  const getStatusLabel = (stage: string) => {
-    switch (stage.toLowerCase()) {
+  const getStatusLabel = (job: Job) => {
+    if (isJobStuck(job)) {
+      return 'Stuck';
+    }
+
+    switch (job.stage.toLowerCase()) {
       case 'completed':
         return 'Completed';
       case 'failed':
@@ -99,7 +128,7 @@ export function JobsListPage() {
       case 'uploading_result':
         return 'Uploading';
       default:
-        return stage;
+        return job.stage;
     }
   };
 
@@ -201,9 +230,9 @@ export function JobsListPage() {
                       </div>
                       <div className="flex items-center gap-3 flex-shrink-0">
                         <div className="flex items-center gap-2">
-                          {getStatusIcon(job.stage)}
-                          <span className="text-xs text-white/50">
-                            {getStatusLabel(job.stage)}
+                          {getStatusIcon(job)}
+                          <span className={`text-xs ${isJobStuck(job) ? 'text-amber-400' : 'text-white/50'}`}>
+                            {getStatusLabel(job)}
                           </span>
                         </div>
                         <button

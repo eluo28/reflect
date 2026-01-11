@@ -120,13 +120,33 @@ class EditExecutorService:
             )
             clip.effects.append(speed_effect)
 
-        # Add metadata for audio level and reasoning
+        # Add metadata for audio level, reasoning, and rotation
         clip.metadata["reflect"] = {
             "clip_type": str(decision.clip_type),
             "audio_level": str(decision.audio_level),
             "chunk_index": decision.chunk_index,
             "reasoning": decision.reasoning,
+            "rotation_degrees": decision.rotation_degrees,
         }
+
+        # Add rotation effect for clips that need it
+        # Store in metadata for NLEs that support it
+        if decision.rotation_degrees != 0:
+            # Add as Effect for NLE compatibility
+            rotation_effect = otio.schema.Effect(
+                name="Rotation",
+                effect_name="rotation",
+                metadata={
+                    "rotation": float(decision.rotation_degrees),
+                    "rotation_degrees": decision.rotation_degrees,
+                },
+            )
+            clip.effects.append(rotation_effect)
+
+            # Also store in clip metadata for broad NLE support
+            clip.metadata["Resolve_Video_Transform"] = {
+                "Rotation": float(decision.rotation_degrees),
+            }
 
         return clip
 

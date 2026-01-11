@@ -30,7 +30,11 @@ async def download_file(file_id: str) -> StreamingResponse:
 
 @router.get("/list/{job_id}", response_model=list[FileInfoResponse])
 async def list_job_files(job_id: str) -> list[FileInfoResponse]:
-    """List all files for a job."""
+    """List all files for a job.
+
+    Uses the job's stored file IDs (video_file_ids + audio_file_ids)
+    to support file reuse across jobs.
+    """
     job_repo = JobRepository.create()
     job = await job_repo.get_job(job_id)
 
@@ -38,15 +42,21 @@ async def list_job_files(job_id: str) -> list[FileInfoResponse]:
         raise HTTPException(status_code=404, detail="Job not found")
 
     gridfs = get_gridfs_service()
-    files = await gridfs.list_files_by_project(job_id)
+    files: list[FileInfoResponse] = []
 
-    return [
-        FileInfoResponse(
-            file_id=f.file_id,
-            filename=f.filename,
-            size_bytes=f.size_bytes,
-            content_type=f.content_type,
-            file_type=str(f.file_type),
-        )
-        for f in files
-    ]
+    # Get files by their IDs stored in the job (supports reused files)
+    all_file_ids = job.video_file_ids + job.audio_file_ids
+    for file_id in all_file_ids:
+        file_info = await gridfs.get_file_info(file_id)
+        if file_info:
+            files.append(
+                FileInfoResponse(
+                    file_id=file_info.file_id,
+                    filename=file_info.filename,
+                    size_bytes=file_info.size_bytes,
+                    content_type=file_info.content_type,
+                    file_type=str(file_info.file_type),
+                )
+            )
+
+    return files

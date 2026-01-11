@@ -36,9 +36,13 @@ export function JobDetailPage() {
   // Determine job state
   const jobStage = currentJob?.stage?.toLowerCase() || '';
   const isDraft = jobStage === 'created';
+  const isQueued = jobStage === 'queued';
   const isJobProcessing = !['created', 'completed', 'failed', 'cancelled'].includes(jobStage);
   const isJobFailed = jobStage === 'failed';
   const hasOutput = currentJob?.otio_file_id != null;
+
+  // Job is stuck only if actively processing (not queued) but no WebSocket progress
+  const isJobStuck = isJobProcessing && !isQueued && !isProcessing;
 
   // Job is "done" if it has output or status indicates completion
   const isJobDone = hasOutput || jobStage === 'completed';
@@ -59,6 +63,13 @@ export function JobDetailPage() {
 
     const loadJob = async () => {
       setIsLoading(true);
+      // Reset all local state for new job
+      setStyleFile(null);
+      setStyleStatus('idle');
+      setStyleMessage('');
+      setIsStarting(false);
+      setIsResuming(false);
+
       try {
         const job = await getJob(jobId);
         setCurrentJob(job);
@@ -520,13 +531,13 @@ export function JobDetailPage() {
                   <>
                     <ProgressTracker
                       jobId={currentJob.id}
-                      isStuck={isJobProcessing && !isProcessing}
+                      isStuck={isJobStuck}
                       hasManifest={currentJob.manifest_id != null}
                       hasBlueprint={currentJob.blueprint_id != null}
                       hasStyleProfile={currentJob.has_style_profile}
                     />
                     {/* Show Resume button for stuck jobs (processing stage but no active progress) */}
-                    {isJobProcessing && !isProcessing && (
+                    {isJobStuck && (
                       <div className="mt-4 pt-4 border-t border-white/[0.06]">
                         <div className="flex items-start gap-3 p-4 rounded-lg bg-amber-500/10 border border-amber-500/20">
                           <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
@@ -553,7 +564,11 @@ export function JobDetailPage() {
                 )}
 
                 {(isJobDone || hasOutput) && !isProcessing && (
-                  <DownloadButton jobId={currentJob.id} />
+                  <DownloadButton
+                    jobId={currentJob.id}
+                    startedAt={currentJob.started_at}
+                    completedAt={currentJob.completed_at}
+                  />
                 )}
 
                 {isJobFailed && !isProcessing && (

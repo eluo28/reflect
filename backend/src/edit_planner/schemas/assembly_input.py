@@ -34,6 +34,7 @@ class ClipForAssembly(BaseReflectModel):
     best_stable_window_start: float | None
     best_stable_window_end: float | None
     tripod_score: float | None
+    rotation_degrees: int = 0
 
 
 class ChunkContext(BaseReflectModel):

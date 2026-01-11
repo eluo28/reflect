@@ -5,8 +5,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
-# Limit concurrent API calls to avoid connection errors
-MAX_CONCURRENT_API_CALLS = 4
+# Limit concurrent API calls to avoid rate limiting
+# OpenAI has rate limits, so we limit concurrency to reduce 429 errors
+MAX_CONCURRENT_API_CALLS = 2
 _api_semaphore: asyncio.Semaphore | None = None
 
 T = TypeVar("T")
@@ -32,11 +33,19 @@ async def _with_retry(
             async with sem:
                 return await coro_func(*args)
         except Exception as e:
-            if "Connection" in str(e) and attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                print(f"  Connection error, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
-                await asyncio.sleep(wait_time)
+            error_type = type(e).__name__
+            error_msg = str(e)
+            print(f"  [Retry] {error_type}: {error_msg[:200]}")
+            if "Connection" in error_msg or "rate" in error_msg.lower() or "429" in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    print(f"  [Retry] Retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"  [Retry] Max retries reached, raising error")
+                    raise
             else:
+                print(f"  [Retry] Non-retryable error, raising immediately")
                 raise
     # This should never be reached due to the raise in the except block
     msg = "Retry loop exited unexpectedly"
@@ -103,9 +112,20 @@ class EditPlannerService:
         chop_points = music.metronome_analysis.chop_points
         beat_grid = music.metronome_analysis.beat_grid
 
-        # Build chunk boundaries from chop points
-        chunk_boundaries = [0.0] + [cp.time_seconds for cp in chop_points]
-        chunk_boundaries.append(music.duration_seconds)
+        # Build chunk boundaries based on style preference
+        beats_per_cut = style.beats_per_cut if style else None
+        if beats_per_cut and beat_grid:
+            # Beat-driven mode: cut every N beats
+            chunk_boundaries = [0.0]
+            for i, beat in enumerate(beat_grid):
+                if i > 0 and i % beats_per_cut == 0:
+                    chunk_boundaries.append(beat.time_seconds)
+            chunk_boundaries.append(music.duration_seconds)
+            print(f"[EditPlanner] Beat-driven mode: cutting every {beats_per_cut} beats")
+        else:
+            # Phrase-driven mode: use chop points (musical phrases)
+            chunk_boundaries = [0.0] + [cp.time_seconds for cp in chop_points]
+            chunk_boundaries.append(music.duration_seconds)
 
         # Prepare clips for assembly
         clips = self._prepare_clips(assembly_input.manifest.video_assets)
@@ -262,6 +282,7 @@ class EditPlannerService:
                     best_stable_window_start=best_window_start,
                     best_stable_window_end=best_window_end,
                     tripod_score=best_tripod_score,
+                    rotation_degrees=asset.rotation_degrees,
                 )
             )
 
@@ -378,6 +399,7 @@ class EditPlannerService:
                     audio_level=audio_level,
                     chunk_index=chunk_context.chunk_index,
                     reasoning=reasoning,
+                    rotation_degrees=clip.rotation_degrees,
                 )
             )
 

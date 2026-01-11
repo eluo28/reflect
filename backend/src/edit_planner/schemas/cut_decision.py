@@ -53,6 +53,9 @@ class CutDecision(BaseReflectModel):
     # Agent reasoning (for debugging/review)
     reasoning: str
 
+    # Video rotation in degrees (0, 90, 180, 270)
+    rotation_degrees: int = 0
+
 
 class ChunkDecisions(BaseReflectModel):
     """All cut decisions for a single music chunk."""

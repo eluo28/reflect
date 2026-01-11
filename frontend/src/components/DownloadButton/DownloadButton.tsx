@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Download, FileDown, Check, ExternalLink } from 'lucide-react';
+import { Download, FileDown, Check, ExternalLink, Clock } from 'lucide-react';
 import clsx from 'clsx';
 import { downloadOtioFile } from '../../api/client';
 
@@ -9,11 +9,34 @@ const API_BASE = '/api';
 interface DownloadButtonProps {
   jobId: string;
   disabled?: boolean;
+  startedAt?: string | null;
+  completedAt?: string | null;
 }
 
-export function DownloadButton({ jobId, disabled }: DownloadButtonProps) {
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+
+  if (hours > 0) {
+    const remainingMinutes = minutes % 60;
+    return `${hours}h ${remainingMinutes}m`;
+  } else if (minutes > 0) {
+    const remainingSeconds = seconds % 60;
+    return `${minutes}m ${remainingSeconds}s`;
+  } else {
+    return `${seconds}s`;
+  }
+}
+
+export function DownloadButton({ jobId, disabled, startedAt, completedAt }: DownloadButtonProps) {
   const [isDownloading, setIsDownloading] = useState(false);
   const [isDownloaded, setIsDownloaded] = useState(false);
+
+  // Calculate duration if both timestamps exist
+  const duration = startedAt && completedAt
+    ? new Date(completedAt).getTime() - new Date(startedAt).getTime()
+    : null;
 
   const handleDownload = async () => {
     setIsDownloading(true);
@@ -47,6 +70,16 @@ export function DownloadButton({ jobId, disabled }: DownloadButtonProps) {
         <span className="label">Export</span>
         <span className="text-[10px] font-mono text-accent-amber">OTIO FORMAT</span>
       </div>
+
+      {/* Duration display */}
+      {duration !== null && (
+        <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-accent-cyan/10 border border-accent-cyan/20">
+          <Clock className="w-3.5 h-3.5 text-accent-cyan" />
+          <span className="text-xs text-accent-cyan">
+            Completed in <span className="font-mono font-medium">{formatDuration(duration)}</span>
+          </span>
+        </div>
+      )}
 
       <motion.button
         onClick={handleDownload}

@@ -83,6 +83,43 @@ class JobRunner:
                         message="Loaded cached analysis results...",
                     )
 
+            # If no checkpoint, try to find reusable manifest by filenames
+            if manifest is None:
+                from src.mongodb.repositories.manifest_repository import compute_files_hash
+
+                # Get all filenames from GridFS
+                all_filenames: list[str] = []
+                for file_id in job.video_file_ids + job.audio_file_ids:
+                    file_info = await self.gridfs.get_file_info(file_id)
+                    if file_info:
+                        all_filenames.append(file_info.filename)
+                        logger.debug("[job=%s] File for hash: %s", self.job_id, file_info.filename)
+
+                if all_filenames:
+                    files_hash = compute_files_hash(all_filenames)
+                    logger.info(
+                        "[job=%s] Checking for reusable manifest: hash=%s, files=%s",
+                        self.job_id,
+                        files_hash,
+                        all_filenames,
+                    )
+                    manifest = await manifest_repo.find_by_files_hash(files_hash)
+                    if manifest:
+                        logger.info("[job=%s] Found reusable manifest from previous job - skipping annotation!", self.job_id)
+                        await self.reporter.send_progress(
+                            stage=PipelineStage.ANNOTATING,
+                            progress_percent=60,
+                            message="Reusing cached analysis from previous job...",
+                        )
+                        # Save as this job's manifest checkpoint
+                        manifest_doc = await manifest_repo.save_manifest(self.job_id, manifest)
+                        manifest_id = str(manifest_doc.id)
+                        await job_repo.set_manifest(self.job_id, manifest_id)
+                    else:
+                        logger.info("[job=%s] No reusable manifest found for hash=%s", self.job_id, files_hash)
+                else:
+                    logger.warning("[job=%s] No filenames found for manifest reuse check", self.job_id)
+
             # Try to load existing blueprint (checkpoint 2)
             if blueprint_id:
                 logger.info("[job=%s] Found existing blueprint checkpoint: %s", self.job_id, blueprint_id)
@@ -220,6 +257,14 @@ class JobRunner:
                         style_profile_json=extracted_profile.model_dump_json(),
                     )
                     logger.info("[job=%s] Style profile checkpoint saved", self.job_id)
+
+                # Log beats_per_cut if detected from style
+                if style_profile and style_profile.beats_per_cut:
+                    logger.info(
+                        "[job=%s] Style profile detected beats_per_cut=%d",
+                        self.job_id,
+                        style_profile.beats_per_cut,
+                    )
 
                 assembly_input = AssemblyInput(
                     manifest=manifest,

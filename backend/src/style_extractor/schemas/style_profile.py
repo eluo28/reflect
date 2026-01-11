@@ -32,3 +32,6 @@ class StyleProfile(BaseReflectModel):
     target_cuts_per_minute: float
     target_clip_duration_range: tuple[float, float]
     prefer_beat_alignment: bool = True
+    # Cut every N beats (e.g., 2 = cut every 2 beats for drum-driven edits)
+    # None = use chunk-based pacing (default behavior)
+    beats_per_cut: int | None = None

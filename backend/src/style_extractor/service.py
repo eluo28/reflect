@@ -51,6 +51,9 @@ class StyleExtractorService:
         pacing = self._compute_pacing(analysis)
         rhythm = self._compute_rhythm(analysis)
 
+        # Estimate beats_per_cut from clip duration consistency
+        beats_per_cut = self._estimate_beats_per_cut(analysis)
+
         # Get natural language description from agent
         prompt = self._build_prompt(analysis)
         result = Runner.run_sync(self._agent, prompt)
@@ -68,6 +71,7 @@ class StyleExtractorService:
             target_cuts_per_minute=target_cuts_per_minute,
             target_clip_duration_range=(min_duration, max_duration),
             prefer_beat_alignment=rhythm.prefers_beat_alignment,
+            beats_per_cut=beats_per_cut,
         )
 
     def _compute_pacing(self, analysis: OTIOAnalysis) -> PacingProfile:
@@ -94,6 +98,7 @@ class StyleExtractorService:
         prefers_quick_cuts = metrics.average_clip_duration_seconds < 2.0
 
         # High variance = varied rhythm
+        # Coefficient of variation: std_dev / mean
         variance = metrics.clip_duration_std_dev / max(
             metrics.average_clip_duration_seconds, 0.001
         )
@@ -110,6 +115,50 @@ class StyleExtractorService:
             avg_cuts_per_music_phrase=avg_cuts_per_phrase,
             cut_frequency_variance=variance,
         )
+
+    def _estimate_beats_per_cut(self, analysis: OTIOAnalysis) -> int | None:
+        """Estimate beats_per_cut from clip duration consistency.
+
+        If clips have consistent durations (low variance), it suggests beat-synced
+        editing. We estimate beats_per_cut based on average duration relative to
+        typical beat timing.
+
+        Returns:
+            Estimated beats_per_cut (1-8), or None if editing doesn't appear
+            to be beat-synced.
+        """
+        metrics = analysis.metrics
+
+        # Coefficient of variation: std_dev / mean
+        # Low CV (<0.4) suggests consistent clip durations = beat-synced
+        if metrics.average_clip_duration_seconds <= 0:
+            return None
+
+        cv = metrics.clip_duration_std_dev / metrics.average_clip_duration_seconds
+
+        # If variance is too high, editing is not beat-synced
+        if cv > 0.4:
+            return None
+
+        # Typical music BPM range: 80-140, with 120 being common
+        # At 120 BPM: 1 beat = 0.5s, 2 beats = 1.0s, 4 beats = 2.0s
+        # We use 120 BPM as reference since it's the most common
+        assumed_beat_duration = 0.5  # seconds per beat at 120 BPM
+
+        avg_duration = metrics.average_clip_duration_seconds
+
+        # Estimate beats per cut
+        estimated_beats = avg_duration / assumed_beat_duration
+
+        # Round to nearest integer and clamp to reasonable range (1-8)
+        beats_per_cut = max(1, min(8, round(estimated_beats)))
+
+        # Only return if clips are reasonably short (beat-driven edits are fast)
+        # If avg duration > 4s, it's likely phrase-based, not beat-based
+        if avg_duration > 4.0:
+            return None
+
+        return beats_per_cut
 
     def _build_prompt(self, analysis: OTIOAnalysis) -> str:
         """Build the prompt for the style extractor agent."""

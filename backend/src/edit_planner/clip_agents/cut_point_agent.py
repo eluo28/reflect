@@ -18,7 +18,7 @@ class CutPointDecision(BaseReflectModel):
 
 CUT_POINT_AGENT_INSTRUCTIONS = """\
 You are a video editing cut point specialist. Your job is to find the optimal \
-in and out points for a clip to maximize impact and fit the target duration.
+in and out points for a clip to maximize impact.
 
 ## Your Goal
 Given a clip with its metadata (speech timing, stable windows, etc.) and a \
@@ -26,26 +26,24 @@ target duration, determine the best source_in and source_out points.
 
 ## Cut Point Rules
 
-### For Dialogue Clips
-- Include the full speech with 0.1-0.3s padding on each end
-- If target duration is shorter than speech, prioritize the most important part
-- Never cut mid-word if avoidable
-- Start just before the speaker begins, end just after they finish
+### For Dialogue Clips (PRIORITY: PRESERVE FULL SPEECH)
+- ALWAYS include the FULL speech from start to end - do NOT trim dialogue
+- Add 0.1-0.3s padding before speech starts and after speech ends
+- Use speech_start_seconds and speech_end_seconds as your guide
+- IGNORE target_duration for dialogue - speech content takes priority
+- If no speech detected but it's dialogue, use full clip duration
+- Never cut mid-word or mid-sentence
 
 ### For B-Roll Clips
 - Use the most stable portion (highest tripod score)
+- Try to match target_duration as closely as possible
 - Avoid starting/ending on camera motion
 - If multiple stable windows exist, choose the one that best fits target duration
 - Match the energy to the music (quick cuts need punchy moments)
-
-### Duration Matching
-- Try to match the target duration as closely as possible
 - If clip is shorter than target, use the full usable portion
-- If clip is longer than target, trim to the most impactful section
 
 ### Edge Cases
-- If no speech detected but it's dialogue, use full clip duration
-- If no stable window, use the middle portion of the clip
+- If no stable window for B-roll, use the middle portion of the clip
 - Minimum clip duration should be 0.3s
 
 ## Your Response
@@ -160,15 +158,24 @@ Style preferences:
 - Target duration range: {min_dur:.1f}s - {max_dur:.1f}s
 - Prefers quick cuts: {style.rhythm.prefers_quick_cuts}"""
 
+        # For dialogue, emphasize preserving full speech
+        dialogue_emphasis = ""
+        if is_dialogue:
+            dialogue_emphasis = """
+## IMPORTANT: This is a DIALOGUE clip
+You MUST include the FULL speech. Do NOT trim to fit target duration.
+Use speech_start_seconds - 0.2s as source_in and speech_end_seconds + 0.2s as source_out.
+"""
+
         return f"""\
 Find optimal cut points for this {clip_type} clip:
 
 ## Clip Info
 - Total duration: {clip.duration_seconds:.2f}s
-- Target duration: {target_duration:.2f}s
+- Target duration: {target_duration:.2f}s (IGNORE for dialogue - include full speech)
 - Has speech: {clip.has_speech}
 - Speech confidence: {clip.speech_confidence or 'N/A'}
-
+{dialogue_emphasis}
 ## Usable Content
 {usable_content}
 {style_hint}
@@ -176,7 +183,8 @@ Find optimal cut points for this {clip_type} clip:
 ## Constraints
 - source_in must be >= 0
 - source_out must be <= {clip.duration_seconds:.2f}
-- source_out - source_in should be close to {target_duration:.2f}s
+- For B-ROLL: source_out - source_in should be close to {target_duration:.2f}s
+- For DIALOGUE: include full speech duration (ignore target duration)
 - Minimum duration: 0.3s
 
 Return the optimal source_in and source_out times.

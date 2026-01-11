@@ -24,7 +24,18 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize and cleanup resources."""
-    # Startup
+    # Startup - backfill files_hash for old manifests
+    from src.mongodb.repositories.manifest_repository import ManifestRepository
+
+    logger = logging.getLogger(__name__)
+    try:
+        manifest_repo = ManifestRepository.create()
+        updated = await manifest_repo.backfill_files_hashes()
+        if updated > 0:
+            logger.info("Backfilled files_hash for %d manifests", updated)
+    except Exception as e:
+        logger.warning("Failed to backfill manifest hashes: %s", e)
+
     yield
     # Shutdown
 

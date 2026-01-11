@@ -8,7 +8,7 @@ from src.style_extractor.service import StyleExtractorService
 
 @cache
 def style_extractor_service(
-    model_identifier: OpenAIModelIdentifier = OpenAIModelIdentifier.GPT_OSS_120B,
+    model_identifier: OpenAIModelIdentifier = OpenAIModelIdentifier.GPT_5_2,
 ) -> StyleExtractorService:
     """Provide a singleton instance of the StyleExtractorService."""
     return StyleExtractorService(model_identifier)

@@ -51,6 +51,59 @@ def _get_duration_ffprobe(file_path: Path) -> float | None:
     return float(duration_str)
 
 
+def _get_rotation_ffprobe(file_path: Path) -> int:
+    """Get video rotation from metadata using ffprobe.
+
+    Returns rotation in degrees (0, 90, 180, 270).
+    Mobile videos often have rotation metadata that needs to be applied.
+    """
+    if shutil.which("ffprobe") is None:
+        return 0
+
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream_tags=rotate:stream_side_data",
+            "-of", "json",
+            str(file_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        return 0
+
+    try:
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return 0
+
+        stream = streams[0]
+
+        # Check for rotation in tags (older format)
+        tags = stream.get("tags", {})
+        if "rotate" in tags:
+            return int(tags["rotate"]) % 360
+
+        # Check for displaymatrix in side_data (newer format)
+        side_data = stream.get("side_data_list", [])
+        for sd in side_data:
+            if sd.get("side_data_type") == "Display Matrix":
+                rotation = sd.get("rotation", 0)
+                # displaymatrix rotation is negative of actual rotation
+                return (-int(rotation)) % 360
+
+    except (json.JSONDecodeError, ValueError, KeyError):
+        pass
+
+    return 0
+
+
 def _get_duration_librosa(file_path: Path) -> float:
     """Get duration using librosa (works for files with audio tracks)."""
     y, sr = librosa.load(str(file_path), sr=None)
@@ -85,6 +138,7 @@ def annotate_video(video_path: Path) -> VideoAssetAnnotation:
         VideoAssetAnnotation with all analysis results.
     """
     duration = get_media_duration(video_path)
+    rotation = _get_rotation_ffprobe(video_path)
     ear_result = analyze_speech(video_path)
     eye_result = analyze_stability(video_path)
 
@@ -94,6 +148,7 @@ def annotate_video(video_path: Path) -> VideoAssetAnnotation:
         duration_seconds=duration,
         ear_analysis=ear_result,
         eye_analysis=eye_result,
+        rotation_degrees=rotation,
     )
 
 

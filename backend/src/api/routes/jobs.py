@@ -1,6 +1,6 @@
 """Job management routes."""
 
-from collections.abc import AsyncIterator
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -12,19 +12,12 @@ from src.mongodb.repositories import JobRepository
 from src.mongodb.schemas import JobDocument, JobStage
 from src.pipeline.job_runner import JobRunner
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
-VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".webm"}
-AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-
-# Chunk size for streaming uploads (1MB for optimal performance)
-UPLOAD_CHUNK_SIZE = 1024 * 1024
-
-
-async def _stream_upload_file(upload_file: UploadFile) -> AsyncIterator[bytes]:
-    """Stream chunks from an UploadFile without loading entire file into memory."""
-    while chunk := await upload_file.read(UPLOAD_CHUNK_SIZE):
-        yield chunk
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".webm", ".m4v", ".mts", ".m2ts", ".3gp", ".wmv", ".flv"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".wma", ".aiff", ".alac"}
 
 
 def _get_file_type(filename: str) -> FileType | None:
@@ -116,31 +109,67 @@ async def upload_files(
     video_ids: list[str] = []
     audio_ids: list[str] = []
 
+    # Track files we've already processed in this upload batch (by filename)
+    # to handle duplicate filenames correctly
+    seen_filenames: dict[str, str] = {}  # filename -> file_id
+
     for upload_file in files:
         if upload_file.filename is None:
+            logger.warning("[job=%s] Skipping file with no filename", job_id)
             continue
 
         file_type = _get_file_type(upload_file.filename)
         if file_type is None:
-            continue  # Skip unsupported files
+            logger.warning("[job=%s] Skipping unsupported file: %s", job_id, upload_file.filename)
+            continue
 
         content_type = upload_file.content_type or "application/octet-stream"
 
-        # Read file into memory for upload + local caching
+        # Read file into memory for local caching
         # (For local dev, caching is more important than memory efficiency)
         contents = await upload_file.read()
 
-        # Upload to GridFS
-        stored = await gridfs.upload_bytes(
-            data=contents,
-            filename=upload_file.filename,
-            file_type=file_type,
-            content_type=content_type,
-            project_id=job_id,
-        )
+        # Check if we already processed this filename in this batch
+        if upload_file.filename in seen_filenames:
+            # Reuse the same file_id for duplicate filename in same batch
+            stored_id = seen_filenames[upload_file.filename]
+            file_info = await gridfs.get_file_info(stored_id)
+            if file_info:
+                # Track file IDs by type (allow duplicates - user uploaded multiple)
+                if file_type == FileType.VIDEO_CLIP:
+                    video_ids.append(stored_id)
+                else:
+                    audio_ids.append(stored_id)
+                responses.append(
+                    UploadResponse(
+                        file_id=file_info.file_id,
+                        filename=file_info.filename,
+                        size_bytes=file_info.size_bytes,
+                        content_type=file_info.content_type,
+                    )
+                )
+            continue
 
-        # Also cache locally for fast pipeline access (skips download later)
-        await gridfs.cache_file(stored.file_id, contents)
+        # Check if file with same name already exists in GridFS (skip upload)
+        existing = await gridfs.find_by_filename(upload_file.filename)
+        if existing:
+            # Reuse existing GridFS file
+            stored = existing
+        else:
+            # Upload to GridFS
+            stored = await gridfs.upload_bytes(
+                data=contents,
+                filename=upload_file.filename,
+                file_type=file_type,
+                content_type=content_type,
+                project_id=job_id,
+            )
+
+        # Remember this filename for this batch
+        seen_filenames[upload_file.filename] = stored.file_id
+
+        # Always cache locally by filename for fast pipeline access
+        await gridfs.cache_file_by_name(upload_file.filename, contents)
 
         # Track file IDs by type
         if file_type == FileType.VIDEO_CLIP:
@@ -162,6 +191,14 @@ async def upload_files(
         await job_repo.add_video_files(job_id, video_ids)
     if audio_ids:
         await job_repo.add_audio_files(job_id, audio_ids)
+
+    logger.info(
+        "[job=%s] Upload complete: %d files received, %d videos + %d audio stored",
+        job_id,
+        len(files),
+        len(video_ids),
+        len(audio_ids),
+    )
 
     return responses
 
@@ -185,14 +222,25 @@ async def upload_style_reference(
 
     gridfs = get_gridfs_service()
 
-    # Upload OTIO to GridFS (style extraction happens in pipeline)
-    stored = await gridfs.upload_stream(
-        stream=_stream_upload_file(file),
-        filename=file.filename,
-        file_type=FileType.OTIO_ARTIFACT,
-        content_type="application/json",
-        project_id=job_id,
-    )
+    # Read file for local caching
+    contents = await file.read()
+
+    # Check if file with same name already exists in GridFS (skip upload)
+    existing = await gridfs.find_by_filename(file.filename)
+    if existing:
+        stored = existing
+    else:
+        # Upload OTIO to GridFS (style extraction happens in pipeline)
+        stored = await gridfs.upload_bytes(
+            data=contents,
+            filename=file.filename,
+            file_type=FileType.OTIO_ARTIFACT,
+            content_type="application/json",
+            project_id=job_id,
+        )
+
+    # Always cache locally for fast pipeline access
+    await gridfs.cache_file_by_name(file.filename, contents)
 
     # Store reference file ID in job
     await job_repo.set_style_profile(
@@ -334,6 +382,6 @@ async def download_otio(job_id: str) -> StreamingResponse:
 
     return StreamingResponse(
         iter([content]),
-        media_type="application/json",
+        media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="reflect_edit_{job_id}.otio"'},
     )
